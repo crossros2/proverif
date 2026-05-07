@@ -1,0 +1,334 @@
+(********************************************************)
+(*                Channels                              *)
+(********************************************************)
+
+free ROS2_ch:channel .         (* public network under Dolev-Yao *)
+free NonROS2_ch:channel . 
+
+(********************************************************)
+(*                   Data types                         *)
+(********************************************************)
+type Cert_t.            (* Certificate *)
+type CN_t.              (* Participant's unique identifier (CNAME) *)
+type Sig_t.             (* Signature *)
+type PermDoc_t.         (* Permission Document with its signature from CA (i.e., permission.p7s) *)
+type tid.         (* Topic identifier *)
+type Seq_dw.          (* Fresh sequence number bound into each signed payload *)
+type ParticipantPermission_t.(* Participant's permissions, about allow and deny. 
+                ParticipantPermission is permission document. we combine them as PermDoc_t*)
+
+type HMACkey_t.         (* Key used in HMAC, can be converted to bitstring *)
+type SSK_t.             (* signing private key *)
+type SPK_t.             (* signing public key, contained in Cert. *)
+type SK_t.              (* HPKE private key *)
+type PK_t.              (* HPKE public key *)
+type Aead_key.          (* aead symmetric key *)
+type Clist_t.           (* List composed of Cert, Perm, c*)
+type Payload_t.         (* List composed of Cert, Perm, c, Sig*)
+
+
+(********************************************************)
+(*                    Constants                         *)
+(********************************************************)
+const SSK_CA:SSK_t [private].
+const CrossROS2_key:Aead_key [private].
+const SROS2_key:Aead_key [private].
+const NonROS2_key:Aead_key [private].
+const SK_Rgroup:SK_t [private]. (* HPKE private key of reader group *)
+
+const CN_CA:CN_t.
+
+(**************************************************************)
+(*                Hash Functions                              *)
+(**************************************************************)
+fun hash(bitstring):bitstring.
+
+(********************************************************)
+(*                Public Key Infrastructure             *)
+(********************************************************)
+fun get_spk(SSK_t): SPK_t.      (* signature *)
+fun get_pk(SK_t): PK_t.         (* HPKE *)
+
+fun sign(SSK_t,bitstring):Sig_t.
+reduc forall key:SSK_t, x:bitstring;
+  verify(get_spk(key),x,sign(key,x)) = true.
+
+fun sign_cert(CN_t,SPK_t,CN_t,SSK_t): Cert_t.
+reduc forall cn:CN_t,spk:SPK_t,cn_CA:CN_t,ssk_CA:SSK_t;
+  check_cert(sign_cert(cn,spk,cn_CA,ssk_CA),get_spk(ssk_CA)) = (cn,spk,cn_CA).
+
+(* Create a certificate *)
+letfun certificate(cn:CN_t, spk:SPK_t) =
+  sign_cert(cn,spk,CN_CA,SSK_CA).
+
+fun sign_perm(CN_t,ParticipantPermission_t,SSK_t): PermDoc_t.
+reduc forall cn:CN_t,pp:ParticipantPermission_t,ssk_CA:SSK_t;
+  check_perm(sign_perm(cn,pp,ssk_CA),get_spk(ssk_CA)) = (cn,pp).
+
+(* Create a permission.p7s *)
+(* Note: The CA that signs permissions policies (permissions.p7s) may be distinct from the CA that issues participant identity certificates;
+in this paper, we assume a single CA performs both roles.*)
+letfun PermissionDoc(cn:CN_t,pp:ParticipantPermission_t) =
+  sign_perm(cn,pp,SSK_CA).
+
+(********************************************************)
+(*                         HPKE                          *)
+(********************************************************)
+
+fun PKEnc(PK_t, Aead_key): bitstring.
+reduc forall sk:SK_t, k:Aead_key;
+  PKDec(sk, PKEnc(get_pk(sk), k)) = k.
+
+(********************************************************)
+(* Authenticated Encryption with Additional Data(AEAD)  *)
+(********************************************************)
+fun enc(Aead_key, bitstring): bitstring.
+(*fun dec(Aead_key, bitstring): bitstring.*)
+reduc forall key:Aead_key, p:bitstring;
+  dec(key, enc(key, p)) = p.
+
+(* TEK distribution payload: certificate, permission, encapsulated TEK, topic, sequence number, and DW signature. *)
+fun pack_payload(Cert_t, PermDoc_t, bitstring, tid, Seq_dw, Sig_t): bitstring [data].
+
+reduc forall cert:Cert_t, perm:PermDoc_t, c:bitstring, topic:tid, seq:Seq_dw, sig:Sig_t;
+  get_cert(pack_payload(cert,perm,c,topic,seq,sig)) = cert.
+reduc forall cert:Cert_t, perm:PermDoc_t, c:bitstring, topic:tid, seq:Seq_dw, sig:Sig_t;
+  get_perm(pack_payload(cert,perm,c,topic,seq,sig)) = perm.
+reduc forall cert:Cert_t, perm:PermDoc_t, c:bitstring, topic:tid, seq:Seq_dw, sig:Sig_t;
+  get_c(pack_payload(cert,perm,c,topic,seq,sig)) = c.
+reduc forall cert:Cert_t, perm:PermDoc_t, c:bitstring, topic:tid, seq:Seq_dw, sig:Sig_t;
+  get_payload_topic(pack_payload(cert,perm,c,topic,seq,sig)) = topic.
+reduc forall cert:Cert_t, perm:PermDoc_t, c:bitstring, topic:tid, seq:Seq_dw, sig:Sig_t;
+  get_payload_seq(pack_payload(cert,perm,c,topic,seq,sig)) = seq.
+reduc forall cert:Cert_t, perm:PermDoc_t, c:bitstring, topic:tid, seq:Seq_dw, sig:Sig_t;
+  get_sig(pack_payload(cert,perm,c,topic,seq,sig)) = sig.
+
+
+(* Data payload: CrossROS2-encrypted message, topic, sequence number, and DW signature. *)
+fun pack_msg(bitstring, tid, Seq_dw, Sig_t): bitstring [data].
+
+reduc forall c2:bitstring, topic:tid, seq:Seq_dw, sig2:Sig_t;
+  get_c2(pack_msg(c2,topic,seq,sig2)) = c2.
+reduc forall c2:bitstring, topic:tid, seq:Seq_dw, sig2:Sig_t;
+  get_msg_topic(pack_msg(c2,topic,seq,sig2)) = topic.
+reduc forall c2:bitstring, topic:tid, seq:Seq_dw, sig2:Sig_t;
+  get_msg_seq(pack_msg(c2,topic,seq,sig2)) = seq.
+reduc forall c2:bitstring, topic:tid, seq:Seq_dw, sig2:Sig_t;
+  get_sig2(pack_msg(c2,topic,seq,sig2)) = sig2.
+
+(********************************************************)
+(*         Constructor functions in process             *)
+(********************************************************)
+fun make_C_list(Cert_t,PermDoc_t,bitstring):Clist_t [data].
+fun Clist2bit(Clist_t):bitstring [typeConverter].
+(* Signature input for TEK distribution. Binding topic and sequence number prevents reuse under another topic/sequence context. *)
+fun make_tek_sig_input(Cert_t, PermDoc_t, bitstring, tid, Seq_dw): bitstring [data].
+(* Signature input for normal data messages. *)
+fun make_msg_sig_input(bitstring, tid, Seq_dw): bitstring [data].
+
+(********************************************************)
+(*        events        *)
+(********************************************************)
+event DIST_TEK(bitstring, Aead_key, tid, Seq_dw).  (* ct=PKEnc(spk, crossROS2_key), crossROS2_key, topic, seq *)
+event GET_TEK(bitstring, Aead_key, tid, Seq_dw). (* ct, crossROS2_key=PKDec(ssk, ct), topic, seq *)
+
+event WRITE_MSG(bitstring, tid, Seq_dw). (* payload, topic, seq *)
+event VRFY_DW(bitstring, tid, Seq_dw).   (* payload, topic, seq *)
+
+(********************************************************)
+(*        queries        *)
+(********************************************************)
+query attacker(CrossROS2_key).
+
+
+query c: bitstring, crossRosKey: Aead_key, topic_t: tid, seq_t: Seq_dw;
+  (* If a reader accepts a TEK for a topic and sequence number, the writer must have distributed that same tuple. *)
+  event(GET_TEK(c, crossRosKey, topic_t, seq_t)) ==> event(DIST_TEK(c, crossRosKey, topic_t, seq_t)).
+
+
+query payload: bitstring,  topic_t: tid, seq_t: Seq_dw;
+  (* If a reader verifies a data payload, the writer must have written that same payload/topic/sequence tuple. *)
+  event(VRFY_DW(payload, topic_t, seq_t)) ==> event(WRITE_MSG(payload, topic_t, seq_t)).
+
+
+
+let DataWriter(CN_DW:CN_t,
+                Cert_DW:Cert_t,
+                SSK_DW:SSK_t,
+                Perm_DW:PermDoc_t,
+                SK_Rgroup:SK_t,
+                PK_Rgroup:PK_t,
+                CrossROS2_key:Aead_key,
+                SROS2_key:Aead_key,
+                PK_CA:SPK_t,
+                Topic_t:tid)=
+
+(* ==send CrossROS2 key to reader group== *)
+  (* tek_seq is signed together with Topic_t and c, so the TEK distribution payload is context-bound. *)
+  new tek_seq: Seq_dw;
+  let c = PKEnc(PK_Rgroup, CrossROS2_key) in
+  let clist = make_C_list(Cert_DW, Perm_DW, c) in
+  let tek_sig_input = make_tek_sig_input(Cert_DW, Perm_DW, c, Topic_t, tek_seq) in
+  let h_clist_b = hash(tek_sig_input) in
+  let sig_dw = sign(SSK_DW, h_clist_b) in
+  let payload = pack_payload(Cert_DW, Perm_DW, c, Topic_t, tek_seq, sig_dw) in
+
+  let ct = enc(SROS2_key, payload) in
+  event DIST_TEK(c, CrossROS2_key, Topic_t, tek_seq);
+  out(ROS2_ch, (Topic_t, ct));
+
+
+  (* msg_seq is independently bound to the encrypted data message and Topic_t. *)
+  new msg_seq: Seq_dw;
+  new m: bitstring;
+  let ct_m = enc(CrossROS2_key, m) in
+  let msg_sig_input = make_msg_sig_input(ct_m, Topic_t, msg_seq) in
+  let h_ct_m = hash(msg_sig_input) in
+  let sig_m = sign(SSK_DW, h_ct_m) in
+  let payload2 = pack_msg(ct_m, Topic_t, msg_seq, sig_m) in
+  let ct_p2 = enc(SROS2_key, payload2) in
+  event WRITE_MSG(payload2, Topic_t, msg_seq);
+  out(ROS2_ch, (Topic_t, ct_p2));
+
+0.
+
+
+let Bridge(CN_B:CN_t,
+           PK_Rgroup:PK_t,
+           PK_CA:SPK_t,
+           SROS2_key:Aead_key,
+           NonROS2_key:Aead_key,
+           Topic_t:tid)=
+
+  in(ROS2_ch, (t_in:tid, ct_in:bitstring));
+  if t_in = Topic_t then
+    let pt_b = dec(SROS2_key, ct_in) in
+    let ct_out = enc(NonROS2_key, pt_b) in
+    out(NonROS2_ch, (t_in, ct_out));
+
+  in(ROS2_ch, (t_in2:tid, ct_in2:bitstring));
+  if t_in2 = Topic_t then 
+    let pt_b2 = dec(SROS2_key, ct_in2) in
+    let ct_out2 = enc(NonROS2_key, pt_b2) in
+    out(NonROS2_ch, (t_in2, ct_out2));
+  
+  0.
+
+let CompromisedBridge(SROS2_key:Aead_key,
+                      NonROS2_key:Aead_key)=
+(* Bridge is compromised *)
+    out(ROS2_ch, SROS2_key);
+    out(NonROS2_ch, NonROS2_key);
+0.
+
+
+let AuthDataReader(CN_DR:CN_t,
+                Cert_DR:Cert_t,
+                SSK_DR:SSK_t,
+                Perm_DR:PermDoc_t,
+                SK_Rgroup:SK_t,
+                PK_Rgroup:PK_t,
+                PK_CA:SPK_t,
+                NonROS2_key:Aead_key,
+                Topic_t:tid,
+                PP_DW_expected:ParticipantPermission_t)=
+
+(* Authorized data reader: decrypt NonROS2, verify cert/perm/sig, then PKDec to get CrossROS2_key *)
+
+  in(NonROS2_ch, (t_in:tid, ct_in:bitstring));
+  if t_in = Topic_t then
+
+    let pt_b = dec(NonROS2_key, ct_in) in
+
+    (* Parse the TEK distribution payload, including the topic and sequence number covered by the signature. *)
+    let Cert_DW = get_cert(pt_b) in
+    let Perm_DW = get_perm(pt_b) in
+    let c = get_c(pt_b) in
+    let signed_topic = get_payload_topic(pt_b) in
+    let tek_seq = get_payload_seq(pt_b) in
+    let sig_dw = get_sig(pt_b) in
+
+    (* verify DW cert (extract signing public key) *)
+    let (cn_cert:CN_t, spk_dw:SPK_t, cn_ca:CN_t) = check_cert(Cert_DW, PK_CA) in
+
+    (* Verify permissions and ensure the signed topic matches the received topic before accepting the TEK. *)
+    let (cn_perm:CN_t, pp_dw:ParticipantPermission_t) = check_perm(Perm_DW, PK_CA) in
+    if signed_topic = t_in then
+      if cn_cert = cn_perm then
+        if pp_dw = PP_DW_expected then
+        let clist = make_C_list(Cert_DW, Perm_DW, c) in
+        let tek_sig_input = make_tek_sig_input(Cert_DW, Perm_DW, c, signed_topic, tek_seq) in
+        let h = hash(tek_sig_input) in
+
+        if verify(spk_dw, h, sig_dw) = true then
+          let crossROS2_key = PKDec(SK_Rgroup, c) in
+          event GET_TEK(c, crossROS2_key, t_in, tek_seq);
+
+
+  (* Verify the data message against the signed topic and sequence number. *)
+  in(NonROS2_ch, (t'_in:tid, ct'_in:bitstring));
+  if t'_in = Topic_t then
+    let pt'_b = dec(NonROS2_key, ct'_in) in
+    let c2 = get_c2(pt'_b) in
+    let signed_topic2 = get_msg_topic(pt'_b) in
+    let msg_seq = get_msg_seq(pt'_b) in
+    let sig2 = get_sig2(pt'_b) in
+    let msg_sig_input = make_msg_sig_input(c2, signed_topic2, msg_seq) in
+    let h2 = hash(msg_sig_input) in
+    if signed_topic2 = t'_in then
+      if verify(spk_dw, h2, sig2) = true then
+        event VRFY_DW(pt'_b, t'_in, msg_seq);
+
+  0.
+
+
+
+process
+    let SPK_CA=get_spk(SSK_CA) in
+    out(ROS2_ch,SPK_CA);
+    out(NonROS2_ch,SPK_CA);
+
+    let PK_Rgroup = get_pk(SK_Rgroup) in
+    out(ROS2_ch,PK_Rgroup);
+    out(NonROS2_ch,PK_Rgroup);
+
+    new Topic_t:tid;
+
+(* for data writer *)
+    new CN_DW:CN_t; new SSK_DW:SSK_t; let Cert_DW=certificate(CN_DW,get_spk(SSK_DW)) in
+    new PP_DW:ParticipantPermission_t; let Perm_DW=PermissionDoc(CN_DW, PP_DW) in
+
+(* for bridge *)
+    new CN_B:CN_t;
+
+(* for data reader *)
+    new CN_DR:CN_t; new SSK_DR:SSK_t; let Cert_DR=certificate(CN_DR,get_spk(SSK_DR)) in
+    new PP_DR:ParticipantPermission_t; let Perm_DR=PermissionDoc(CN_DR, PP_DR) in
+
+
+(* for unauthorized data reader 
+    new CN_uDR:CN_t; new SSK_uDR:SSK_t; let Cert_uDR=certificate(CN_uDR,get_spk(SSK_uDR)) in
+    new PP_uDR:ParticipantPermission_t; let Perm_uDR=PermissionDoc(CN_uDR, PP_uDR) in
+*)
+
+
+  ( DataWriter(CN_DW, Cert_DW, SSK_DW, Perm_DW, SK_Rgroup, PK_Rgroup, CrossROS2_key, SROS2_key, SPK_CA, Topic_t)
+  | Bridge(CN_B, PK_Rgroup,SPK_CA,SROS2_key,NonROS2_key,Topic_t)
+  | AuthDataReader(CN_DR, Cert_DR, SSK_DR, Perm_DR, SK_Rgroup, PK_Rgroup, SPK_CA, NonROS2_key, Topic_t, PP_DW)
+  | CompromisedBridge(SROS2_key,NonROS2_key)
+  )
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
