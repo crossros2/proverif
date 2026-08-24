@@ -1,0 +1,473 @@
+(********************************************************)
+(* CrossROS2 post-removal TEK secrecy model             *)
+(*                                                      *)
+(* This model does not implement MLS or TreeKEM.        *)
+(* A fresh reader-group HPKE key pair at epoch1 is the  *)
+(* abstract output of the trusted group-management      *)
+(* layer after a reader has been removed.               *)
+(********************************************************)
+
+(********************************************************)
+(* Channels                                             *)
+(********************************************************)
+
+free ROS2_ch:channel.
+free NonROS2_ch:channel.
+
+(********************************************************)
+(* Protocol-specific data types                         *)
+(********************************************************)
+
+type Cert_t.
+type CN_t.
+type Sig_t.
+type PermDoc_t.
+type ParticipantPermission_t.
+type SSK_t.
+type SPK_t.
+type tid.
+type epoch_t.
+type Seq_dw.
+
+(* Paper terminology: the topic encryption key and the
+   reader-group HPKE key pair are distinct protocol roles. *)
+type TEK_t.
+type ReaderGroupSK_t.
+type ReaderGroupPK_t.
+
+(* SROS2 and non-ROS2 hop protection is separate from TEK. *)
+type TransportKey_t.
+
+(********************************************************)
+(* Constants                                            *)
+(********************************************************)
+
+const SSK_CA:SSK_t [private].
+const SSK_AM:SSK_t [private].
+const SROS2_key:TransportKey_t [private].
+const NonROS2_key:TransportKey_t [private].
+
+(* These are abstract TEKs for two consecutive membership states. *)
+free tek:TEK_t [private].
+free tek':TEK_t [private].
+
+const CN_CA:CN_t.
+const epoch0:epoch_t.
+const epoch1:epoch_t.
+
+(********************************************************)
+(* Hash and signatures                                  *)
+(********************************************************)
+
+fun hash(bitstring):bitstring.
+
+fun get_spk(SSK_t):SPK_t.
+fun sign(SSK_t,bitstring):Sig_t.
+
+reduc forall key:SSK_t, x:bitstring;
+  verify(get_spk(key),x,sign(key,x)) = true.
+
+(********************************************************)
+(* Certificates and permissions                         *)
+(********************************************************)
+
+fun sign_cert(CN_t,SPK_t,CN_t,SSK_t):Cert_t.
+
+reduc forall cn:CN_t, spk:SPK_t, cn_CA:CN_t, ssk_CA:SSK_t;
+  check_cert(sign_cert(cn,spk,cn_CA,ssk_CA),get_spk(ssk_CA))
+    = (cn,spk,cn_CA).
+
+letfun certificate(cn:CN_t, spk:SPK_t) =
+  sign_cert(cn,spk,CN_CA,SSK_CA).
+
+fun sign_perm(CN_t,ParticipantPermission_t,SSK_t):PermDoc_t.
+
+reduc forall cn:CN_t, pp:ParticipantPermission_t, ssk_CA:SSK_t;
+  check_perm(sign_perm(cn,pp,ssk_CA),get_spk(ssk_CA)) = (cn,pp).
+
+letfun PermissionDoc(cn:CN_t, pp:ParticipantPermission_t) =
+  sign_perm(cn,pp,SSK_CA).
+
+(********************************************************)
+(* Reader-group HPKE for TEK distribution               *)
+(********************************************************)
+
+fun get_group_pk(ReaderGroupSK_t):ReaderGroupPK_t.
+fun PKEnc(ReaderGroupPK_t,TEK_t):bitstring.
+
+reduc forall sk:ReaderGroupSK_t, tek:TEK_t;
+  PKDec(sk,PKEnc(get_group_pk(sk),tek)) = tek.
+
+(********************************************************)
+(* Topic encryption and hop protection                  *)
+(********************************************************)
+
+fun EncTEK(TEK_t,bitstring):bitstring.
+
+reduc forall tek:TEK_t, m:bitstring;
+  DecTEK(tek,EncTEK(tek,m)) = m.
+
+fun EncTransport(TransportKey_t,bitstring):bitstring.
+
+reduc forall key:TransportKey_t, p:bitstring;
+  DecTransport(key,EncTransport(key,p)) = p.
+
+(********************************************************)
+(* AM-authenticated reader-group public-key record       *)
+(********************************************************)
+
+fun pack_group_key_record(tid,epoch_t,ReaderGroupPK_t):bitstring [data].
+
+reduc forall topic:tid, epoch:epoch_t, pk:ReaderGroupPK_t;
+  get_gk_topic(pack_group_key_record(topic,epoch,pk)) = topic.
+reduc forall topic:tid, epoch:epoch_t, pk:ReaderGroupPK_t;
+  get_gk_epoch(pack_group_key_record(topic,epoch,pk)) = epoch.
+reduc forall topic:tid, epoch:epoch_t, pk:ReaderGroupPK_t;
+  get_gk_pk(pack_group_key_record(topic,epoch,pk)) = pk.
+
+(********************************************************)
+(* Epoch-bound TEK distribution payload                 *)
+(********************************************************)
+
+fun pack_tek_payload(
+  Cert_t,
+  PermDoc_t,
+  bitstring,
+  tid,
+  epoch_t,
+  Seq_dw,
+  Sig_t
+):bitstring [data].
+
+reduc forall cert:Cert_t, perm:PermDoc_t, c:bitstring,
+             topic:tid, epoch:epoch_t, seq:Seq_dw, sig:Sig_t;
+  get_cert(pack_tek_payload(cert,perm,c,topic,epoch,seq,sig)) = cert.
+reduc forall cert:Cert_t, perm:PermDoc_t, c:bitstring,
+             topic:tid, epoch:epoch_t, seq:Seq_dw, sig:Sig_t;
+  get_perm(pack_tek_payload(cert,perm,c,topic,epoch,seq,sig)) = perm.
+reduc forall cert:Cert_t, perm:PermDoc_t, c:bitstring,
+             topic:tid, epoch:epoch_t, seq:Seq_dw, sig:Sig_t;
+  get_tek_ciphertext(pack_tek_payload(cert,perm,c,topic,epoch,seq,sig)) = c.
+reduc forall cert:Cert_t, perm:PermDoc_t, c:bitstring,
+             topic:tid, epoch:epoch_t, seq:Seq_dw, sig:Sig_t;
+  get_payload_topic(pack_tek_payload(cert,perm,c,topic,epoch,seq,sig)) = topic.
+reduc forall cert:Cert_t, perm:PermDoc_t, c:bitstring,
+             topic:tid, epoch:epoch_t, seq:Seq_dw, sig:Sig_t;
+  get_payload_epoch(pack_tek_payload(cert,perm,c,topic,epoch,seq,sig)) = epoch.
+reduc forall cert:Cert_t, perm:PermDoc_t, c:bitstring,
+             topic:tid, epoch:epoch_t, seq:Seq_dw, sig:Sig_t;
+  get_payload_seq(pack_tek_payload(cert,perm,c,topic,epoch,seq,sig)) = seq.
+reduc forall cert:Cert_t, perm:PermDoc_t, c:bitstring,
+             topic:tid, epoch:epoch_t, seq:Seq_dw, sig:Sig_t;
+  get_payload_sig(pack_tek_payload(cert,perm,c,topic,epoch,seq,sig)) = sig.
+
+fun make_tek_sig_input(
+  Cert_t,
+  PermDoc_t,
+  bitstring,
+  tid,
+  epoch_t,
+  Seq_dw
+):bitstring [data].
+
+(********************************************************)
+(* Epoch-bound runtime data payload                     *)
+(********************************************************)
+
+fun pack_msg(bitstring,tid,epoch_t,Seq_dw,Sig_t):bitstring [data].
+
+reduc forall c:bitstring, topic:tid, epoch:epoch_t,
+             seq:Seq_dw, sig:Sig_t;
+  get_msg_ciphertext(pack_msg(c,topic,epoch,seq,sig)) = c.
+reduc forall c:bitstring, topic:tid, epoch:epoch_t,
+             seq:Seq_dw, sig:Sig_t;
+  get_msg_topic(pack_msg(c,topic,epoch,seq,sig)) = topic.
+reduc forall c:bitstring, topic:tid, epoch:epoch_t,
+             seq:Seq_dw, sig:Sig_t;
+  get_msg_epoch(pack_msg(c,topic,epoch,seq,sig)) = epoch.
+reduc forall c:bitstring, topic:tid, epoch:epoch_t,
+             seq:Seq_dw, sig:Sig_t;
+  get_msg_seq(pack_msg(c,topic,epoch,seq,sig)) = seq.
+reduc forall c:bitstring, topic:tid, epoch:epoch_t,
+             seq:Seq_dw, sig:Sig_t;
+  get_msg_sig(pack_msg(c,topic,epoch,seq,sig)) = sig.
+
+fun make_msg_sig_input(bitstring,tid,epoch_t,Seq_dw):bitstring [data].
+
+(********************************************************)
+(* Events                                               *)
+(********************************************************)
+
+event MEMBER_ACTIVE(CN_t,tid,epoch_t).
+event MEMBER_REMOVED(CN_t,tid,epoch_t).
+
+event AM_PUBLISH_GROUP_KEY(ReaderGroupPK_t,tid,epoch_t).
+event DW_USE_GROUP_KEY(ReaderGroupPK_t,tid,epoch_t).
+
+event DIST_TEK(bitstring,TEK_t,tid,epoch_t,Seq_dw).
+event GET_TEK(CN_t,bitstring,TEK_t,tid,epoch_t,Seq_dw).
+event WRITE_MSG(bitstring,TEK_t,tid,epoch_t,Seq_dw).
+event VRFY_DW(CN_t,bitstring,TEK_t,tid,epoch_t,Seq_dw).
+
+(********************************************************)
+(* Security queries                                     *)
+(********************************************************)
+
+(* Post-removal TEK secrecy: even after all secrets legitimately
+   held by the former epoch0 member are leaked, the attacker must
+   not derive the fresh epoch1 TEK. *)
+query attacker(tek').
+
+(********************************************************)
+(* Roles                                                *)
+(********************************************************)
+
+(* AM publishes a signed binding of topic, epoch, and the
+   abstract group-management output pk_DR^tid. *)
+let AMPublishGroupKey(
+      SSK_AM:SSK_t,
+      PK_Rgroup:ReaderGroupPK_t,
+      Topic_t:tid,
+      Epoch_t:epoch_t) =
+
+  let record = pack_group_key_record(Topic_t,Epoch_t,PK_Rgroup) in
+  let record_sig = sign(SSK_AM,hash(record)) in
+  event AM_PUBLISH_GROUP_KEY(PK_Rgroup,Topic_t,Epoch_t);
+  out(ROS2_ch,(record,record_sig));
+  0.
+
+
+(* Publish a valid epoch0 TEK payload. The attacker retains it
+   and may replay it after the transition to epoch1. *)
+let PublishEpoch0TEK(
+      Cert_DW:Cert_t,
+      SSK_DW:SSK_t,
+      Perm_DW:PermDoc_t,
+      PK_Rgroup:ReaderGroupPK_t,
+      TEK:TEK_t,
+      SROS2_key:TransportKey_t,
+      Topic_t:tid) =
+
+  new tek_seq_epoch0:Seq_dw;
+  let c = PKEnc(PK_Rgroup,TEK) in
+  let sig_input =
+    make_tek_sig_input(Cert_DW,Perm_DW,c,Topic_t,epoch0,tek_seq_epoch0) in
+  let sig_dw = sign(SSK_DW,hash(sig_input)) in
+  let payload =
+    pack_tek_payload(Cert_DW,Perm_DW,c,Topic_t,epoch0,tek_seq_epoch0,sig_dw) in
+  let protected_payload = EncTransport(SROS2_key,payload) in
+  event DIST_TEK(c,TEK,Topic_t,epoch0,tek_seq_epoch0);
+  out(ROS2_ch,(Topic_t,protected_payload));
+  0.
+
+
+(* After removal, the writer accepts only an AM-signed record
+   for the expected epoch, then distributes a fresh TEK. *)
+let DataWriterEpoch1(
+      Cert_DW:Cert_t,
+      SSK_DW:SSK_t,
+      Perm_DW:PermDoc_t,
+      SPK_AM:SPK_t,
+      tek':TEK_t,
+      Message:bitstring,
+      SROS2_key:TransportKey_t,
+      Topic_t:tid,
+      Expected_epoch:epoch_t) =
+
+  in(ROS2_ch,(record:bitstring,record_sig:Sig_t));
+  let record_topic = get_gk_topic(record) in
+  let record_epoch = get_gk_epoch(record) in
+  let group_pk = get_gk_pk(record) in
+  if record_topic = Topic_t then
+    if record_epoch = Expected_epoch then
+      if verify(SPK_AM,hash(record),record_sig) = true then
+        event DW_USE_GROUP_KEY(group_pk,Topic_t,Expected_epoch);
+
+        new tek_seq_epoch1:Seq_dw;
+        let c = PKEnc(group_pk,tek') in
+        let tek_sig_input =
+          make_tek_sig_input(
+            Cert_DW,Perm_DW,c,Topic_t,Expected_epoch,tek_seq_epoch1) in
+        let sig_dw = sign(SSK_DW,hash(tek_sig_input)) in
+        let tek_payload =
+          pack_tek_payload(
+            Cert_DW,Perm_DW,c,Topic_t,Expected_epoch,tek_seq_epoch1,sig_dw) in
+        let protected_tek_payload = EncTransport(SROS2_key,tek_payload) in
+        event DIST_TEK(c,tek',Topic_t,Expected_epoch,tek_seq_epoch1);
+        out(ROS2_ch,(Topic_t,protected_tek_payload));
+
+        new msg_seq_epoch1:Seq_dw;
+        let msg_ciphertext = EncTEK(tek',Message) in
+        let msg_sig_input =
+          make_msg_sig_input(
+            msg_ciphertext,Topic_t,Expected_epoch,msg_seq_epoch1) in
+        let msg_sig = sign(SSK_DW,hash(msg_sig_input)) in
+        let msg_payload =
+          pack_msg(
+            msg_ciphertext,Topic_t,Expected_epoch,msg_seq_epoch1,msg_sig) in
+        let protected_msg_payload = EncTransport(SROS2_key,msg_payload) in
+        event WRITE_MSG(
+          msg_payload,tek',Topic_t,Expected_epoch,msg_seq_epoch1);
+        out(ROS2_ch,(Topic_t,protected_msg_payload));
+  0.
+
+
+let BridgeEpoch1(
+      SROS2_key:TransportKey_t,
+      NonROS2_key:TransportKey_t,
+      Topic_t:tid) =
+
+  in(ROS2_ch,(topic_in:tid,ct_in:bitstring));
+  if topic_in = Topic_t then
+    let payload = DecTransport(SROS2_key,ct_in) in
+    out(NonROS2_ch,(topic_in,EncTransport(NonROS2_key,payload)));
+
+  in(ROS2_ch,(topic_in2:tid,ct_in2:bitstring));
+  if topic_in2 = Topic_t then
+    let payload2 = DecTransport(SROS2_key,ct_in2) in
+    out(NonROS2_ch,(topic_in2,EncTransport(NonROS2_key,payload2)));
+  0.
+
+
+let AuthorizedReaderEpoch1(
+      CN_DR:CN_t,
+      SK_Rgroup:ReaderGroupSK_t,
+      PK_CA:SPK_t,
+      NonROS2_key:TransportKey_t,
+      Topic_t:tid,
+      Expected_epoch:epoch_t,
+      PP_DW_expected:ParticipantPermission_t) =
+
+  in(NonROS2_ch,(topic_in:tid,ct_in:bitstring));
+  if topic_in = Topic_t then
+    let payload = DecTransport(NonROS2_key,ct_in) in
+    let Cert_DW = get_cert(payload) in
+    let Perm_DW = get_perm(payload) in
+    let c = get_tek_ciphertext(payload) in
+    let signed_topic = get_payload_topic(payload) in
+    let signed_epoch = get_payload_epoch(payload) in
+    let tek_seq = get_payload_seq(payload) in
+    let sig_dw = get_payload_sig(payload) in
+
+    let (cn_cert:CN_t,spk_dw:SPK_t,cn_ca:CN_t) =
+      check_cert(Cert_DW,PK_CA) in
+    let (cn_perm:CN_t,pp_dw:ParticipantPermission_t) =
+      check_perm(Perm_DW,PK_CA) in
+    if signed_topic = topic_in then
+      if signed_epoch = Expected_epoch then
+        if cn_cert = cn_perm then
+          if pp_dw = PP_DW_expected then
+            let sig_input =
+              make_tek_sig_input(
+                Cert_DW,Perm_DW,c,signed_topic,signed_epoch,tek_seq) in
+            if verify(spk_dw,hash(sig_input),sig_dw) = true then
+              let tek = PKDec(SK_Rgroup,c) in
+              event GET_TEK(
+                CN_DR,c,tek,topic_in,Expected_epoch,tek_seq);
+
+              in(NonROS2_ch,(topic_in2:tid,ct_in2:bitstring));
+              if topic_in2 = Topic_t then
+                let msg_payload = DecTransport(NonROS2_key,ct_in2) in
+                let msg_ciphertext = get_msg_ciphertext(msg_payload) in
+                let msg_topic = get_msg_topic(msg_payload) in
+                let msg_epoch = get_msg_epoch(msg_payload) in
+                let msg_seq = get_msg_seq(msg_payload) in
+                let msg_sig = get_msg_sig(msg_payload) in
+                if msg_topic = topic_in2 then
+                  if msg_epoch = Expected_epoch then
+                    let msg_sig_input =
+                      make_msg_sig_input(
+                        msg_ciphertext,msg_topic,msg_epoch,msg_seq) in
+                    if verify(spk_dw,hash(msg_sig_input),msg_sig) = true then
+                      let message = DecTEK(tek,msg_ciphertext) in
+                      event VRFY_DW(
+                        CN_DR,msg_payload,tek,topic_in2,Expected_epoch,msg_seq);
+  0.
+
+
+(* At removal time, the adversary receives exactly the state that
+   the former member legitimately retained from epoch0. *)
+let LeakOldState(
+      tek:TEK_t,
+      SK_Rgroup_old:ReaderGroupSK_t) =
+
+  out(ROS2_ch,tek);
+  out(ROS2_ch,SK_Rgroup_old);
+  0.
+
+
+let CompromisedBridge(
+      SROS2_key:TransportKey_t,
+      NonROS2_key:TransportKey_t) =
+
+  out(ROS2_ch,SROS2_key);
+  out(NonROS2_ch,NonROS2_key);
+  0.
+
+(********************************************************)
+(* Two-epoch system                                     *)
+(********************************************************)
+
+process
+  let SPK_CA = get_spk(SSK_CA) in
+  let SPK_AM = get_spk(SSK_AM) in
+  out(ROS2_ch,SPK_CA);
+  out(ROS2_ch,SPK_AM);
+  out(NonROS2_ch,SPK_CA);
+  out(NonROS2_ch,SPK_AM);
+
+  new Topic_t:tid;
+
+  new CN_DW:CN_t;
+  new SSK_DW:SSK_t;
+  let Cert_DW = certificate(CN_DW,get_spk(SSK_DW)) in
+  new PP_DW:ParticipantPermission_t;
+  let Perm_DW = PermissionDoc(CN_DW,PP_DW) in
+
+  new current_reader_id:CN_t;
+  new former_reader_id:CN_t;
+
+  (* These fresh key pairs are the abstract outputs of group
+     management for two consecutive epochs. *)
+  new SK_Rgroup_epoch0:ReaderGroupSK_t;
+  let PK_Rgroup_epoch0 = get_group_pk(SK_Rgroup_epoch0) in
+  new SK_Rgroup_epoch1:ReaderGroupSK_t;
+  let PK_Rgroup_epoch1 = get_group_pk(SK_Rgroup_epoch1) in
+
+  new message_epoch1:bitstring;
+
+  event MEMBER_ACTIVE(current_reader_id,Topic_t,epoch0);
+  event MEMBER_ACTIVE(former_reader_id,Topic_t,epoch0);
+
+  (
+    AMPublishGroupKey(
+      SSK_AM,PK_Rgroup_epoch0,Topic_t,epoch0)
+  |
+    PublishEpoch0TEK(
+      Cert_DW,SSK_DW,Perm_DW,PK_Rgroup_epoch0,
+      tek,SROS2_key,Topic_t)
+  |
+    CompromisedBridge(SROS2_key,NonROS2_key)
+  |
+    phase 1;
+    event MEMBER_REMOVED(former_reader_id,Topic_t,epoch1);
+    event MEMBER_ACTIVE(current_reader_id,Topic_t,epoch1);
+    (
+      AMPublishGroupKey(
+        SSK_AM,PK_Rgroup_epoch1,Topic_t,epoch1)
+    |
+      DataWriterEpoch1(
+        Cert_DW,SSK_DW,Perm_DW,SPK_AM,
+        tek',message_epoch1,
+        SROS2_key,Topic_t,epoch1)
+    |
+      BridgeEpoch1(SROS2_key,NonROS2_key,Topic_t)
+    |
+      AuthorizedReaderEpoch1(
+        current_reader_id,SK_Rgroup_epoch1,SPK_CA,
+        NonROS2_key,Topic_t,epoch1,PP_DW)
+    |
+      LeakOldState(
+        tek,SK_Rgroup_epoch0)
+    )
+  )
