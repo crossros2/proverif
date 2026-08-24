@@ -1,10 +1,10 @@
 (********************************************************)
-(* CrossROS2 post-removal TEK secrecy model             *)
+(* CrossROS2 post-revocation TEK secrecy model          *)
 (*                                                      *)
 (* This model does not implement MLS or TreeKEM.        *)
 (* A fresh reader-group HPKE key pair at epoch1 is the  *)
 (* abstract output of the trusted group-management      *)
-(* layer after a reader has been removed.               *)
+(* layer after a reader has been revoked.               *)
 (********************************************************)
 
 (********************************************************)
@@ -95,8 +95,8 @@ letfun PermissionDoc(cn:CN_t, pp:ParticipantPermission_t) =
 fun get_group_pk(ReaderGroupSK_t):ReaderGroupPK_t.
 fun PKEnc(ReaderGroupPK_t,TEK_t):bitstring.
 
-reduc forall sk:ReaderGroupSK_t, tek:TEK_t;
-  PKDec(sk,PKEnc(get_group_pk(sk),tek)) = tek.
+reduc forall sk:ReaderGroupSK_t, tek_key:TEK_t;
+  PKDec(sk,PKEnc(get_group_pk(sk),tek_key)) = tek_key.
 
 (********************************************************)
 (* Topic encryption and hop protection                  *)
@@ -104,8 +104,8 @@ reduc forall sk:ReaderGroupSK_t, tek:TEK_t;
 
 fun EncTEK(TEK_t,bitstring):bitstring.
 
-reduc forall tek:TEK_t, m:bitstring;
-  DecTEK(tek,EncTEK(tek,m)) = m.
+reduc forall tek_key:TEK_t, m:bitstring;
+  DecTEK(tek_key,EncTEK(tek_key,m)) = m.
 
 fun EncTransport(TransportKey_t,bitstring):bitstring.
 
@@ -199,7 +199,7 @@ fun make_msg_sig_input(bitstring,tid,epoch_t,Seq_dw):bitstring [data].
 (********************************************************)
 
 event MEMBER_ACTIVE(CN_t,tid,epoch_t).
-event MEMBER_REMOVED(CN_t,tid,epoch_t).
+event MEMBER_REVOKED(CN_t,tid,epoch_t).
 
 event AM_PUBLISH_GROUP_KEY(ReaderGroupPK_t,tid,epoch_t).
 event DW_USE_GROUP_KEY(ReaderGroupPK_t,tid,epoch_t).
@@ -213,8 +213,8 @@ event VRFY_DW(CN_t,bitstring,TEK_t,tid,epoch_t,Seq_dw).
 (* Security queries                                     *)
 (********************************************************)
 
-(* Post-removal TEK secrecy: even after all secrets legitimately
-   held by the former epoch0 member are leaked, the attacker must
+(* Post-revocation TEK secrecy: even after all secrets legitimately
+   held by the revoked reader in epoch0 are leaked, the attacker must
    not derive the fresh epoch1 TEK. *)
 query attacker(tek').
 
@@ -261,14 +261,14 @@ let PublishEpoch0TEK(
   0.
 
 
-(* After removal, the writer accepts only an AM-signed record
+(* After revocation, the writer accepts only an AM-signed record
    for the expected epoch, then distributes a fresh TEK. *)
 let DataWriterEpoch1(
       Cert_DW:Cert_t,
       SSK_DW:SSK_t,
       Perm_DW:PermDoc_t,
       SPK_AM:SPK_t,
-      tek':TEK_t,
+      TEK_epoch1:TEK_t,
       Message:bitstring,
       SROS2_key:TransportKey_t,
       Topic_t:tid,
@@ -284,7 +284,7 @@ let DataWriterEpoch1(
         event DW_USE_GROUP_KEY(group_pk,Topic_t,Expected_epoch);
 
         new tek_seq_epoch1:Seq_dw;
-        let c = PKEnc(group_pk,tek') in
+        let c = PKEnc(group_pk,TEK_epoch1) in
         let tek_sig_input =
           make_tek_sig_input(
             Cert_DW,Perm_DW,c,Topic_t,Expected_epoch,tek_seq_epoch1) in
@@ -293,11 +293,11 @@ let DataWriterEpoch1(
           pack_tek_payload(
             Cert_DW,Perm_DW,c,Topic_t,Expected_epoch,tek_seq_epoch1,sig_dw) in
         let protected_tek_payload = EncTransport(SROS2_key,tek_payload) in
-        event DIST_TEK(c,tek',Topic_t,Expected_epoch,tek_seq_epoch1);
+        event DIST_TEK(c,TEK_epoch1,Topic_t,Expected_epoch,tek_seq_epoch1);
         out(ROS2_ch,(Topic_t,protected_tek_payload));
 
         new msg_seq_epoch1:Seq_dw;
-        let msg_ciphertext = EncTEK(tek',Message) in
+        let msg_ciphertext = EncTEK(TEK_epoch1,Message) in
         let msg_sig_input =
           make_msg_sig_input(
             msg_ciphertext,Topic_t,Expected_epoch,msg_seq_epoch1) in
@@ -307,7 +307,7 @@ let DataWriterEpoch1(
             msg_ciphertext,Topic_t,Expected_epoch,msg_seq_epoch1,msg_sig) in
         let protected_msg_payload = EncTransport(SROS2_key,msg_payload) in
         event WRITE_MSG(
-          msg_payload,tek',Topic_t,Expected_epoch,msg_seq_epoch1);
+          msg_payload,TEK_epoch1,Topic_t,Expected_epoch,msg_seq_epoch1);
         out(ROS2_ch,(Topic_t,protected_msg_payload));
   0.
 
@@ -361,9 +361,9 @@ let AuthorizedReaderEpoch1(
               make_tek_sig_input(
                 Cert_DW,Perm_DW,c,signed_topic,signed_epoch,tek_seq) in
             if verify(spk_dw,hash(sig_input),sig_dw) = true then
-              let tek = PKDec(SK_Rgroup,c) in
+              let reader_tek = PKDec(SK_Rgroup,c) in
               event GET_TEK(
-                CN_DR,c,tek,topic_in,Expected_epoch,tek_seq);
+                CN_DR,c,reader_tek,topic_in,Expected_epoch,tek_seq);
 
               in(NonROS2_ch,(topic_in2:tid,ct_in2:bitstring));
               if topic_in2 = Topic_t then
@@ -379,20 +379,20 @@ let AuthorizedReaderEpoch1(
                       make_msg_sig_input(
                         msg_ciphertext,msg_topic,msg_epoch,msg_seq) in
                     if verify(spk_dw,hash(msg_sig_input),msg_sig) = true then
-                      let message = DecTEK(tek,msg_ciphertext) in
+                      let message = DecTEK(reader_tek,msg_ciphertext) in
                       event VRFY_DW(
-                        CN_DR,msg_payload,tek,topic_in2,Expected_epoch,msg_seq);
+                        CN_DR,msg_payload,reader_tek,topic_in2,Expected_epoch,msg_seq);
   0.
 
 
-(* At removal time, the adversary receives exactly the state that
-   the former member legitimately retained from epoch0. *)
-let LeakOldState(
-      tek:TEK_t,
-      SK_Rgroup_old:ReaderGroupSK_t) =
+(* At revocation time, the adversary receives exactly the state that
+   the revoked reader legitimately retained from epoch0. *)
+let LeakRevokedReaderState(
+      TEK_epoch0:TEK_t,
+      SK_Rgroup_revoked:ReaderGroupSK_t) =
 
-  out(ROS2_ch,tek);
-  out(ROS2_ch,SK_Rgroup_old);
+  out(ROS2_ch,TEK_epoch0);
+  out(ROS2_ch,SK_Rgroup_revoked);
   0.
 
 
@@ -425,7 +425,7 @@ process
   let Perm_DW = PermissionDoc(CN_DW,PP_DW) in
 
   new current_reader_id:CN_t;
-  new former_reader_id:CN_t;
+  new revoked_reader_id:CN_t;
 
   (* These fresh key pairs are the abstract outputs of group
      management for two consecutive epochs. *)
@@ -437,7 +437,7 @@ process
   new message_epoch1:bitstring;
 
   event MEMBER_ACTIVE(current_reader_id,Topic_t,epoch0);
-  event MEMBER_ACTIVE(former_reader_id,Topic_t,epoch0);
+  event MEMBER_ACTIVE(revoked_reader_id,Topic_t,epoch0);
 
   (
     AMPublishGroupKey(
@@ -450,7 +450,7 @@ process
     CompromisedBridge(SROS2_key,NonROS2_key)
   |
     phase 1;
-    event MEMBER_REMOVED(former_reader_id,Topic_t,epoch1);
+    event MEMBER_REVOKED(revoked_reader_id,Topic_t,epoch1);
     event MEMBER_ACTIVE(current_reader_id,Topic_t,epoch1);
     (
       AMPublishGroupKey(
@@ -467,7 +467,7 @@ process
         current_reader_id,SK_Rgroup_epoch1,SPK_CA,
         NonROS2_key,Topic_t,epoch1,PP_DW)
     |
-      LeakOldState(
+      LeakRevokedReaderState(
         tek,SK_Rgroup_epoch0)
     )
   )

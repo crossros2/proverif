@@ -5,9 +5,9 @@ This directory contains ProVerif models for checking the CrossROS2 bridging prot
 ## Files
 
 - `CrossROS2.pv`: updated CrossROS2 ProVerif model that binds `tid` and `Seq_dw` into the signed TEK distribution payload and signed data payload.
-- `CrossROS2_membership.pv`: two-epoch model for post-removal re-keying. It uses the paper-specific `TEK_t`, reader-group HPKE key types, epoch-bound signatures, and an AM-signed group-public-key record.
+- `CrossROS2_membership.pv`: two-epoch model for post-revocation re-keying. It uses the paper-specific `TEK_t`, reader-group HPKE key types, epoch-bound signatures, and an AM-signed group-public-key record.
 
-`CrossROS2_membership.pv` does not implement MLS or TreeKEM. A fresh reader-group HPKE key pair and fresh TEK at `epoch1` are abstract outputs of the trusted group-management layer after a reader is removed. At removal time, the attacker receives the former member's old TEK and old reader-group private key; the compromised bridge also reveals both transport keys.
+`CrossROS2_membership.pv` does not implement MLS or TreeKEM. A fresh reader-group HPKE key pair and fresh TEK at `epoch1` are abstract outputs of the trusted group-management layer after a reader is revoked. At revocation time, the attacker receives the revoked reader's old TEK and old reader-group private key; the compromised bridge also reveals both transport keys.
 
 ## Model Scope
 
@@ -25,11 +25,11 @@ This file corresponds to the original three-query verification summary in the pa
 
 ### `CrossROS2_membership.pv`
 
-This is the membership-change extension used to analyze the reviewer's revocation and key-update concern. The model separates two membership epochs. In `epoch0`, both the current reader and the reader that will later be revoked are valid group members. In `epoch1`, the revoked reader is removed, the reader-group HPKE key pair is refreshed, and the data writer distributes a fresh topic encryption key `tek'` under the updated reader-group public key.
+This is the membership-change extension used to analyze the reviewer's revocation and key-update concern. The model separates two membership epochs. In `epoch0`, both the current reader and the reader that will later be revoked are valid group members. In `epoch1`, the revoked reader is no longer an authorized group member, the reader-group HPKE key pair is refreshed, and the data writer distributes a fresh topic encryption key `tek'` under the updated reader-group public key.
 
-The model intentionally does not implement the full MLS or TreeKEM update algorithm. Instead, the updated reader-group key pair and the fresh `tek'` are modeled as the abstract result of a trusted group-management layer. This keeps the verification focused on the CrossROS2 security property: whether old key material held by a removed member is enough to learn the new topic encryption key.
+The model intentionally does not implement the full MLS or TreeKEM update algorithm. Instead, the updated reader-group key pair and the fresh `tek'` are modeled as the abstract result of a trusted group-management layer. This keeps the verification focused on the CrossROS2 security property: whether old key material held by a revoked reader is enough to learn the new topic encryption key.
 
-The adversary is given the strongest former-reader view modeled here: the previous topic encryption key `tek`, the previous reader-group private key, all public protocol traffic, and both compromised bridge transport keys. The single query checks that this information is still insufficient to derive the newly distributed `tek'`.
+The adversary is given the strongest revoked-reader view modeled here: the previous topic encryption key `tek`, the previous reader-group private key, all public protocol traffic, and both compromised bridge transport keys. The single query checks that this information is still insufficient to derive the newly distributed `tek'`.
 
 ## Requirements
 
@@ -98,9 +98,9 @@ For `CrossROS2_membership.pv`, the expected verification summary is:
 Query not attacker(tek') is true.
 ```
 
-Depending on the ProVerif rendering of phases, the concrete output may appear as `Query not attacker_p1(tek'[]) is true.` This is the same secrecy check for the post-removal `epoch1` key.
+Depending on the ProVerif rendering of phases, the concrete output may appear as `Query not attacker_p1(tek'[]) is true.` This is the same secrecy check for the post-revocation `epoch1` key.
 
-The former reader was an authorized `epoch0` member. After its removal, `LeakOldState` gives the attacker `tek` and the previous reader-group private key. Public protocol traffic, certificates, permissions, and transport keys are also available. The single secrecy query proves that this complete former-member view is insufficient to derive the fresh `tek'`.
+The revoked reader was an authorized `epoch0` member. After its revocation, `LeakRevokedReaderState` gives the attacker `tek` and the previous reader-group private key. Public protocol traffic, certificates, permissions, and transport keys are also available. The single secrecy query proves that this complete revoked-reader view is insufficient to derive the fresh `tek'`.
 
 When this result is reported together with the baseline model, it becomes the second confidentiality query in the paper-level summary:
 
